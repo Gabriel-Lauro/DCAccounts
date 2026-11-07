@@ -1,0 +1,17 @@
+# Ambiente / build
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+icon.ico
+build_log.txt
+
+# Executável (vai na aba Releases, não no repositório)
+DCAccounts.exe
+
+# DADOS PESSOAIS - contêm tokens das suas contas. NUNCA suba para o GitHub.
+accounts.json
+profiles/
+original_device.json
