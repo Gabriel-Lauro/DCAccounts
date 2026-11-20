@@ -12,7 +12,7 @@ e permite trocar a conta que está ativa no computador com um clique.
 - Ativa uma conta por vez: ao trocar, para a atual de forma graciosa (Ctrl+C) e inicia a nova.
 - Mostra o status de cada conta (parada, conectando, online, erro) e o log do agente.
 - Abre o link de autorização automaticamente no primeiro login de cada conta.
-- Fica na bandeja do sistema, com menu para trocar de conta rapidamente.
+- Janela normal: minimizar minimiza, e o X fecha o programa de verdade (encerra o agente).
 
 ## Como funciona
 
@@ -40,7 +40,7 @@ Dá para alterar em **Configurar comando do device...**.
 1. Baixe o `DCAccounts.exe` na aba **Releases**.
 2. Coloque-o em uma pasta sua (ele cria `accounts.json` e `profiles\` ao lado dele).
 3. Abra, clique em **Adicionar conta**, faça o login pelo link que abrir e pronto.
-4. Para trocar de conta: selecione-a e clique em **Ativar / trocar**, ou use o menu da bandeja.
+4. Para trocar de conta: selecione-a e clique em **Ativar / trocar**, a conta anterior fica vermelha (Desconectada) e a nova inicia na hora.
 
 ## Rodando pelo código
 

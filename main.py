@@ -21,7 +21,7 @@ import uuid
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -31,12 +31,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSplitter,
-    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -51,12 +49,14 @@ COLORS = {
     "starting": "#e0a800",
     "online": "#2e9e44",
     "error": "#d64545",
+    "disconnected": "#d64545",
 }
 LABELS = {
     "stopped": "Parada",
     "starting": "Conectando...",
     "online": "Online",
     "error": "Erro / encerrada",
+    "disconnected": "Desconectada",
 }
 
 
@@ -182,20 +182,6 @@ def resolve_command(cmdline: str | None) -> list[str] | None:
 # ----------------------------------------------------------------------------
 # Execução do processo
 # ----------------------------------------------------------------------------
-def send_ctrl_c(pid: int) -> None:
-    """Envia Ctrl+C ao console (oculto) do processo filho no Windows."""
-    import ctypes
-
-    k = ctypes.windll.kernel32
-    k.FreeConsole()
-    if k.AttachConsole(pid):
-        k.SetConsoleCtrlHandler(None, True)  # ignora o Ctrl+C neste processo
-        k.GenerateConsoleCtrlEvent(0, 0)  # CTRL_C_EVENT
-        time.sleep(0.3)
-        k.FreeConsole()
-        k.SetConsoleCtrlHandler(None, False)
-
-
 class Runner(QObject):
     line = Signal(str, str)  # account_id, texto
     exited = Signal(str, int)  # account_id, código
@@ -204,13 +190,14 @@ class Runner(QObject):
         super().__init__()
         self.proc: subprocess.Popen | None = None
         self.account_id: str | None = None
-        self.wrapped_in_cmd = False
+        self.stopping = False
 
     def is_running(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
     def start(self, account_id: str, cmd: list[str]) -> None:
         install_session(account_id)
+        self.stopping = False
         env = os.environ.copy()  # home REAL: a máquina remota continua vendo o seu usuário
         env["NO_COLOR"] = "1"
         env["FORCE_COLOR"] = "0"
@@ -236,7 +223,6 @@ class Runner(QObject):
             **kwargs,
         )
         self.account_id = account_id
-        self.wrapped_in_cmd = cmd[0].lower().endswith("cmd.exe")
         threading.Thread(target=self._read, args=(self.proc, account_id), daemon=True).start()
 
     def _read(self, proc: subprocess.Popen, account_id: str) -> None:
@@ -255,29 +241,19 @@ class Runner(QObject):
         self.exited.emit(account_id, code)
 
     def stop(self, blocking: bool = False) -> None:
+        """Mata o processo (e o cmd/node filhos) imediatamente, sem esperar encerramento gracioso."""
         proc = self.proc
         if proc is None or proc.poll() is not None:
             return
-        t = threading.Thread(target=self._terminate, args=(proc, self.wrapped_in_cmd), daemon=True)
+        self.stopping = True
+        t = threading.Thread(target=self._kill, args=(proc,), daemon=True)
         t.start()
         if blocking:
-            t.join(15)
+            t.join(5)
 
     @staticmethod
-    def _terminate(proc: subprocess.Popen, wrapped_in_cmd: bool = False) -> None:
+    def _kill(proc: subprocess.Popen) -> None:
         try:
-            if IS_WIN:
-                send_ctrl_c(proc.pid)
-                if wrapped_in_cmd:  # fallback: responde ao prompt do cmd (S = pt-BR, Y = inglês)
-                    try:
-                        proc.stdin.write(b"S\r\nY\r\n")
-                        proc.stdin.flush()
-                    except Exception:
-                        pass
-            else:
-                proc.send_signal(signal.SIGINT)
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
             if IS_WIN:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -285,9 +261,12 @@ class Runner(QObject):
                     creationflags=subprocess.CREATE_NO_WINDOW,
                 )
             else:
-                proc.kill()
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
 
 
 # ----------------------------------------------------------------------------
@@ -402,20 +381,8 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("Nenhuma conta ativa")
         self.statusBar().addPermanentWidget(self.status_label)
 
-        # --- tray
-        self.tray = QSystemTrayIcon(app_icon(), self)
-        self.tray.setToolTip("DC Accounts")
-        self.tray_menu = QMenu()
-        self.switch_menu = QMenu("Trocar para")
-        self.tray_menu.aboutToShow.connect(self.rebuild_tray_menu)
-        self.tray.setContextMenu(self.tray_menu)
-        self.tray.activated.connect(self.on_tray_activated)
-        self.tray.show()
-        self.warned_tray = False
-
         self.refresh_list()
         self.update_buttons()
-        self.rebuild_tray_menu()
 
     # ------------------------------------------------------------------ helpers
     def account(self, account_id: str) -> dict | None:
@@ -442,12 +409,8 @@ class MainWindow(QMainWindow):
         if self.runner.is_running() and self.runner.account_id:
             st = self.status.get(self.runner.account_id, "starting")
             self.status_label.setText(f"Ativa: {self.name_of(self.runner.account_id)} ({LABELS[st]})")
-            self.tray.setToolTip(f"DC Accounts - {self.name_of(self.runner.account_id)}")
-            self.tray.setIcon(app_icon(COLORS[st]))
         else:
             self.status_label.setText("Nenhuma conta ativa")
-            self.tray.setToolTip("DC Accounts - nenhuma conta ativa")
-            self.tray.setIcon(app_icon("#8a8a8a"))
 
     def refresh_list(self) -> None:
         current = self.selected_id()
@@ -550,7 +513,9 @@ class MainWindow(QMainWindow):
             if self.runner.account_id == account_id:
                 return
             self.pending = account_id
-            self.log_line(f"--- trocando: parando '{self.name_of(self.runner.account_id)}' ---")
+            old = self.runner.account_id
+            self.log_line(f"--- trocando: encerrando '{self.name_of(old)}' ---")
+            self.set_status(old, "disconnected")  # conta anterior fica vermelha na hora
             self.runner.stop()
             return
         self.start_account(account_id)
@@ -606,8 +571,8 @@ class MainWindow(QMainWindow):
         was_current = self.runner.account_id == account_id
         if was_current:
             self.runner.proc = None
-        requested = self.pending is not None or self.exit_requested or code in (0, -2, 130, 0xC000013A)
-        self.set_status(account_id, "stopped" if requested else "error")
+        requested = self.runner.stopping or self.pending is not None or self.exit_requested
+        self.set_status(account_id, "disconnected" if requested else "error")
         self.log_line(f"--- '{self.name_of(account_id)}' encerrada (código {code}) ---")
         if self.pending:
             nxt, self.pending = self.pending, None
@@ -633,56 +598,12 @@ class MainWindow(QMainWindow):
             save_config(self.cfg)
             self.log_line(f"[config] comando = {text.strip()}")
 
-    # ------------------------------------------------------------------ tray
-    def rebuild_tray_menu(self) -> None:
-        self.tray_menu.clear()
-        act_open = QAction("Abrir janela", self.tray_menu)
-        act_open.triggered.connect(self.show_window)
-        self.tray_menu.addAction(act_open)
-
-        self.tray_menu.addSeparator()
-        for a in self.cfg["accounts"]:
-            running_this = self.runner.is_running() and self.runner.account_id == a["id"]
-            act = QAction(("● " if running_this else "    ") + a["name"], self.tray_menu)
-            act.triggered.connect(lambda _=False, i=a["id"]: self.activate(i))
-            self.tray_menu.addAction(act)
-        self.tray_menu.addSeparator()
-
-        act_stop = QAction("Parar conta atual", self.tray_menu)
-        act_stop.setEnabled(self.runner.is_running())
-        act_stop.triggered.connect(self.stop_current)
-        self.tray_menu.addAction(act_stop)
-
-        act_quit = QAction("Sair", self.tray_menu)
-        act_quit.triggered.connect(self.quit_app)
-        self.tray_menu.addAction(act_quit)
-
-    def on_tray_activated(self, reason) -> None:
-        if reason == QSystemTrayIcon.Trigger:
-            self.show_window()
-
-    def show_window(self) -> None:
-        self.showNormal()
-        self.raise_()
-        self.activateWindow()
-
-    def closeEvent(self, event) -> None:  # fecha para a bandeja
-        event.ignore()
-        self.hide()
-        if not self.warned_tray:
-            self.warned_tray = True
-            self.tray.showMessage(
-                "DC Accounts",
-                "Continua rodando na bandeja. Use 'Sair' no menu para encerrar.",
-                QSystemTrayIcon.Information,
-                4000,
-            )
-
-    def quit_app(self) -> None:
+    # ------------------------------------------------------------------ janela
+    def closeEvent(self, event) -> None:  # clicar no X fecha o programa de verdade
         self.exit_requested = True
         self.pending = None
         self.runner.stop(blocking=True)
-        self.tray.hide()
+        event.accept()
         QApplication.quit()
 
 
@@ -711,10 +632,8 @@ def main() -> int:
         make_icon_file(sys.argv[2])
         return 0
     migrate_legacy_data()
-    app.setQuitOnLastWindowClosed(False)
+    app.setQuitOnLastWindowClosed(True)
     app.setApplicationName(APP_NAME)
-    if not QSystemTrayIcon.isSystemTrayAvailable():
-        QMessageBox.warning(None, APP_NAME, "Bandeja do sistema indisponível; usando só a janela.")
     win = MainWindow()
     win.show()
     return app.exec()
